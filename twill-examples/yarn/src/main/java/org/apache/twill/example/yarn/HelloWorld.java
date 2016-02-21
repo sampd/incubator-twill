@@ -21,8 +21,11 @@ import com.google.common.base.Joiner;
 import com.google.common.base.Splitter;
 import com.google.common.collect.Iterables;
 import com.google.common.collect.Lists;
+import com.google.common.collect.Multiset;
 import com.google.common.util.concurrent.Futures;
 import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.FSDataInputStream;
+import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileSystem;
 import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.yarn.conf.YarnConfiguration;
@@ -47,6 +50,7 @@ import java.io.PrintWriter;
 import java.net.InetAddress;
 import java.net.URL;
 import java.net.UnknownHostException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -74,34 +78,83 @@ public class HelloWorld {
     }
     */
 
-    private void runSystemCommand () throws IOException {
+    private void runSystemCommand (String fsa,String finalWeight, String finalSymbol,String shard) throws IOException {
+
+      LOG.info("Coming here ");
+
+      File fsaFile = new File(fsa);
+      File finalWeightFile = new File(finalWeight);
+      File finalSymbolFile = new File(finalSymbol);
+      FileSystem fs = FileSystem.get(new Configuration());
+      FSDataOutputStream fsDataOutputStream = fs.create(new Path("/tmp/sam_wfst/shard_" + shard));
+
+
       Runtime rt = Runtime.getRuntime();
-      Process process = rt.exec("cat /proc/meminfo");
-      BufferedReader br = new BufferedReader(new InputStreamReader(process.getInputStream()));
-      String line = null;
-      while ((line = br.readLine())!=null){
-        LOG.info(line);
+
+
+      try {
+        String command = "wc -l " + fsaFile + " " + finalWeightFile + " " + finalSymbolFile;
+        Process process = rt.exec(command);
+
+        BufferedReader br = new BufferedReader(new InputStreamReader(process.getInputStream()));
+        String line = null;
+        while ((line = br.readLine()) != null) {
+          LOG.info(line);
+          fsDataOutputStream.writeUTF(line);
+        }
+        br = new BufferedReader(new InputStreamReader(process.getErrorStream()));
+        line = null;
+        while ((line = br.readLine()) != null) {
+          LOG.info(line);
+        }
+      }
+      finally {
+        fsDataOutputStream.close();
+        fs.close();
+      }
+
+    }
+
+    private void printCurrentDirDetails(String dir){
+      File currentDir = new File(dir);
+      if(currentDir.isDirectory()){
+        LOG.info("Yes this is a dir");
+        File[] files = currentDir.listFiles();
+        LOG.info("Found "+ files.length + "entries");
+        for(File file:files){
+          if(file.getName().startsWith("wfst_")){
+            LOG.info("Size: "+file.length());
+          }
+          LOG.info(file.getName());
+        }
+      }
+      else{
+        LOG.info("No way .. just no way");
       }
     }
 
 
     @Override
     public void run() {
-      String[] args = getContext().getArguments();
-      String time = args[1];
-      String myIP;
-      File f = new File("test_file");
-      String filePath = f.getAbsolutePath();
+
       try {
-        myIP = InetAddress.getLocalHost().getHostName();
-      } catch (UnknownHostException e) {
-        e.printStackTrace();
-        myIP = "Fuck !!!";
-      }
-      LOG.info("OH MY GOID");
-      LOG.info("Hello World. My "+ time +" distributed application. I can see this file " + filePath);
-      try {
-        runSystemCommand();
+
+        String[] args = getContext().getArguments();
+
+        String shard = args[0];
+        //FileSystem fs = FileSystem.get(new Configuration());
+
+
+
+
+
+
+        LOG.info("OH MY GOID");
+        // LOG.info("Hello World. My "+ time +" distributed application. I can see this file " + filePath);
+
+
+        runSystemCommand("finalFSA.txt","finalWeight.txt","finalSymbol.txt",shard);
+
       } catch (IOException e) {
         //
         LOG.info("Error running command");
@@ -122,6 +175,7 @@ public class HelloWorld {
     }
 
     String zkStr = args[0];
+    String shard = args[1];
     YarnConfiguration yarnConfiguration = new YarnConfiguration();
     final TwillRunnerService twillRunner =
       new YarnTwillRunnerService(
@@ -135,13 +189,14 @@ public class HelloWorld {
     Iterables.addAll(applicationClassPaths, Splitter.on(",").split(yarnClasspath));
 
 
+
     final TwillController controller =
     //        twillRunner.prepare(new HelloWorldRunnable())
-     twillRunner.prepare(new HelloWorldApplication(new YarnConfiguration()))
+     twillRunner.prepare(new HelloWorldApplication(new YarnConfiguration(),shard))
         .addLogHandler(new PrinterLogHandler(new PrintWriter(System.out, true)))
         .withApplicationClassPaths(applicationClassPaths)
         .withBundlerClassAcceptor(new HadoopClassExcluder())
-             .withArguments("HelloWorld","Time","third")
+        .withArguments("WFST",shard)
         .start();
 
     Runtime.getRuntime().addShutdownHook(new Thread() {
@@ -174,9 +229,11 @@ public class HelloWorld {
 
     Configuration conf;
     FileSystem fs;
-    public HelloWorldApplication(Configuration conf) throws IOException {
+    private String shard;
+    public HelloWorldApplication(Configuration conf, String shard) throws IOException {
       this.conf = conf;
       fs = FileSystem.get(this.conf);
+      this.shard = shard;
     }
 
     private Map<String,String> argMap() {
@@ -190,18 +247,30 @@ public class HelloWorld {
 
     @Override
     public TwillSpecification configure() {
+      String pathPrefix = "/home/buildbot/wfst/shard_";
+
       try {
         return TwillSpecification.Builder.with()
                 .setName("Twilltest")
                 .withRunnable()
-                .add("HelloWorld", new HelloWorldRunnable(),ResourceSpecification.Builder.with()
+                .add("WFST", new HelloWorldRunnable(),ResourceSpecification.Builder.with()
                         .setVirtualCores(2)
                         .setMemory(1, ResourceSpecification.SizeUnit.GIGA)
-                        .setInstances(5).build()).withLocalFiles()
-                .add("test_file",fs.resolvePath(new Path("/user/samprince_william/test.txt")).toUri())
+                        //.setInstances(5)
+                         .build()).withLocalFiles()
+                .add("finalFSA.txt", new File(pathPrefix +shard+ "/finalFSA.txt"))
+                .add("finalSymbol.txt", new File( pathPrefix + shard+ "/finalSymbol.txt"))
+                .add("finalWeight.txt", new File(pathPrefix + shard+ "/finalWeight.txt"))
                 .apply()
-
-                //.add("Helloworld 2",new HelloWorldRunnable()).noLocalFiles()
+                /*.add("WFST_B",new HelloWorldRunnable(conf),ResourceSpecification.Builder.with()
+                        .setVirtualCores(2)
+                        .setMemory(1, ResourceSpecification.SizeUnit.GIGA)
+                        //.setInstances(5)
+                        .build()).withLocalFiles()
+                .add("test_file",fs.resolvePath(new Path("/user/samprince_william/test.txt")).toUri())
+                .add("wfst_b", new File("wfst/wfst_b"),"*")
+                .apply()
+                //.add("Helloworld 2",new HelloWorldRunnable()).noLocalFiles()*/
                 .anyOrder()
                 .build();
       }
